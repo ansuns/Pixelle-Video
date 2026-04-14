@@ -20,13 +20,10 @@ RUN if [ "$USE_CN_MIRROR" = "true" ]; then \
 # Install system dependencies
 # - curl: for health checks and downloads
 # - ffmpeg: for video/audio processing
-# - chromium: for html2image rendering
 # - fonts-noto-cjk: for CJK character support
 RUN apt-get update && apt-get install -y \
     curl \
     ffmpeg \
-    chromium \
-    chromium-driver \
     fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,7 +51,8 @@ RUN export UV_HTTP_TIMEOUT=300 && \
         uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple; \
     else \
         uv pip install -e .; \
-    fi
+    fi && \
+    playwright install --with-deps chromium
 
 # Copy rest of application code
 COPY api ./api
@@ -68,10 +66,6 @@ COPY docs/FAQ*.md ./docs/
 
 # Create output, data and temp directories
 RUN mkdir -p /app/output /app/data /app/temp
-
-# Set environment variables for html2image to use chromium
-ENV BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV CHROME_BIN=/usr/bin/chromium
 
 # Expose ports
 # 8000: API service

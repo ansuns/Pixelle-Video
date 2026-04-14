@@ -20,12 +20,10 @@ ffmpeg:
   # Alternative mirror
   mirror_url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 
-# Chrome/Chromium configuration (for html2image)
-chrome:
-  include: false  # Set to true to bundle Chrome portable
-  version: "120.0.6099.109"
-  download_url: ""  # Add portable Chrome download URL if needed
-  note: "Users can use system Chrome or install separately"
+# Playwright configuration (for HTML template rendering)
+playwright:
+  install_browsers: true  # Run 'playwright install chromium' during build
+  note: "Playwright manages its own Chromium binary, no system Chrome needed"
 
 # Build options
 build:

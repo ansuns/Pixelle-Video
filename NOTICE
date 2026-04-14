@@ -129,8 +129,8 @@ Open Source Software Licensed under the MIT License:
 2. pyyaml 6.0.0 
 3. comfykit 0.1.6 
 4. certifi 2025.10.5 
-5. html2image 2.0.7 https://pypi.org/project/html2image
-Copyright (c) 2020 vgalin
+5. playwright 1.58.0 https://pypi.org/project/playwright
+Copyright (c) Microsoft Corporation
 6. edge-tts 7.2.3 
 7. fastapi 0.115.0 https://pypi.org/project/fastapi
 Copyright (c) 2018 Sebasti  n Ram  rez

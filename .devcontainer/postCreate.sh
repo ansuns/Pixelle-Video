@@ -34,22 +34,10 @@ sudo apt-get install -y --no-install-recommends \
   xdg-utils \
   ca-certificates || true
 
-# Install chromium
-echo "[devcontainer] Installing chromium..."
-sudo apt-get install -y --no-install-recommends chromium 2>/dev/null || true
-
 # Verify installation
 echo "[devcontainer] Verifying system packages..."
 echo "[devcontainer] Chinese fonts (sample):"
 fc-list :lang=zh | head -n 10 || true
-
-if command -v chromium >/dev/null 2>&1; then
-  echo "[devcontainer] chromium -> $(command -v chromium)"
-elif command -v chromium-browser >/dev/null 2>&1; then
-  echo "[devcontainer] chromium-browser -> $(command -v chromium-browser)"
-else
-  echo "[devcontainer] Warning: chromium not found in PATH"
-fi
 
 # ============================================================================
 # Python Dependencies Installation
@@ -62,5 +50,9 @@ pip install uv --quiet
 # Install Python dependencies with uv
 echo "[devcontainer] Installing Python dependencies with uv..."
 uv sync --frozen
+
+# Install Playwright browser (Chromium for HTML template rendering)
+echo "[devcontainer] Installing Playwright Chromium browser..."
+uv run playwright install --with-deps chromium || true
 
 echo "[devcontainer] postCreate complete. Streamlit will start automatically via postStart.sh"

@@ -13,7 +13,7 @@
 """
 HTML-based Frame Generator Service
 
-Renders HTML templates to frame images with variable substitution
+Renders HTML templates to frame images using Playwright for headless browser rendering.
 
 Linux Environment Requirements:
     - fontconfig package must be installed
@@ -21,17 +21,17 @@ Linux Environment Requirements:
     
     Ubuntu/Debian: sudo apt-get install -y fontconfig fonts-liberation fonts-noto-cjk
     CentOS/RHEL: sudo yum install -y fontconfig liberation-fonts google-noto-cjk-fonts
+    
+    Playwright browser install: playwright install --with-deps chromium
 """
 
-from math import log
 import os
 import re
+import tempfile
 import uuid
 from typing import Dict, Any, Optional
 from pathlib import Path
-from html2image import Html2Image
 from loguru import logger
-from PIL import Image
 
 from pixelle_video.utils.template_util import parse_template_size
 
@@ -41,7 +41,7 @@ class HTMLFrameGenerator:
     HTML-based frame generator
     
     Renders HTML templates to frame images with variable substitution.
-    Users can create custom templates using any HTML/CSS.
+    Uses Playwright for reliable headless browser rendering.
     
     Usage:
         >>> generator = HTMLFrameGenerator("templates/modern.html")
@@ -53,13 +53,9 @@ class HTMLFrameGenerator:
         ... )
     """
     
-    # Workaround for Chromium screenshot height issue
-    # Due to a Chromium bug that causes screenshots to be cropped at the bottom,
-    # we temporarily render with extra height and then crop it back.
-    # See: https://issues.chromium.org/issues/405165895
-    # This is a temporary workaround until the issue is fixed in Chromium.
-    CHROMIUM_HEIGHT_OFFSET = 87
-    
+    _browser = None
+    _playwright = None
+
     def __init__(self, template_path: str):
         """
         Initialize HTML frame generator
@@ -73,7 +69,6 @@ class HTMLFrameGenerator:
         # Parse video size from template path
         self.width, self.height = parse_template_size(template_path)
         
-        self.hti = None  # Lazy init to avoid overhead
         self._check_linux_dependencies()
         logger.debug(f"Loaded HTML template: {template_path} (size: {self.width}x{self.height})")
     
@@ -86,7 +81,6 @@ class HTMLFrameGenerator:
         try:
             import subprocess
             
-            # Check fontconfig
             result = subprocess.run(
                 ['fc-list'], 
                 capture_output=True, 
@@ -95,20 +89,20 @@ class HTMLFrameGenerator:
             
             if result.returncode != 0:
                 logger.warning(
-                    "⚠️  fontconfig not found or not working properly. "
+                    "fontconfig not found or not working properly. "
                     "Install with: sudo apt-get install -y fontconfig fonts-liberation fonts-noto-cjk"
                 )
             elif not result.stdout:
                 logger.warning(
-                    "⚠️  No fonts detected by fontconfig. "
+                    "No fonts detected by fontconfig. "
                     "Install fonts with: sudo apt-get install -y fonts-liberation fonts-noto-cjk"
                 )
             else:
-                logger.debug(f"✓ Fontconfig detected {len(result.stdout.splitlines())} fonts")
+                logger.debug(f"Fontconfig detected {len(result.stdout.splitlines())} fonts")
                 
         except FileNotFoundError:
             logger.warning(
-                "⚠️  fontconfig (fc-list) not found on system. "
+                "fontconfig (fc-list) not found on system. "
                 "Install with: sudo apt-get install -y fontconfig"
             )
         except Exception as e:
@@ -142,7 +136,6 @@ class HTMLFrameGenerator:
         try:
             soup = BeautifulSoup(self.template, 'html.parser')
             
-            # Find width and height meta tags
             width_meta = soup.find('meta', attrs={'name': 'template:media-width'})
             height_meta = soup.find('meta', attrs={'name': 'template:media-height'})
             
@@ -174,7 +167,6 @@ class HTMLFrameGenerator:
         if media_width and media_height:
             return media_width, media_height
         
-        # Fallback to default if not specified (should not happen with properly configured templates)
         logger.warning(f"No media size meta tags found in template {self.template_path}, using fallback 1024x1024")
         return 1024, 1024
     
@@ -200,40 +192,33 @@ class HTMLFrameGenerator:
                 }
             }
         """
-        # Preset parameters that should be ignored (auto-injected by system)
         PRESET_PARAMS = {'title', 'text', 'image', 'index'}
         
-        # Pattern: {{param_name:type=default}} or {{param_name=default}} or {{param_name:type}} or {{param_name}}
-        # Param name: must start with letter or underscore, can contain letters, digits, underscores
         PARAM_PATTERN = r'\{\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([a-z]+))?(?:=([^}]+))?\}\}'
         
         params = {}
         
         for match in re.finditer(PARAM_PATTERN, self.template):
             param_name = match.group(1)
-            param_type = match.group(2) or 'text'  # Default to text
+            param_type = match.group(2) or 'text'
             default_value = match.group(3)
             
-            # Skip preset parameters
             if param_name in PRESET_PARAMS:
                 continue
             
-            # Skip if already parsed (use first occurrence)
             if param_name in params:
                 continue
             
-            # Validate type
             if param_type not in {'text', 'number', 'color', 'bool'}:
                 logger.warning(f"Unknown parameter type '{param_type}' for '{param_name}', defaulting to 'text'")
                 param_type = 'text'
             
-            # Parse default value based on type
             parsed_default = self._parse_default_value(param_type, default_value)
             
             params[param_name] = {
                 'type': param_type,
                 'default': parsed_default,
-                'label': param_name,  # Use param name as label
+                'label': param_name,
             }
         
         if params:
@@ -253,7 +238,6 @@ class HTMLFrameGenerator:
             Parsed value with appropriate type
         """
         if value_str is None:
-            # No default value specified, return type-specific defaults
             return {
                 'text': '',
                 'number': 0,
@@ -263,7 +247,6 @@ class HTMLFrameGenerator:
         
         if param_type == 'number':
             try:
-                # Try int first, then float
                 if '.' in value_str:
                     return float(value_str)
                 else:
@@ -273,11 +256,9 @@ class HTMLFrameGenerator:
                 return 0
         
         elif param_type == 'bool':
-            # Accept: true/false, 1/0, yes/no, on/off (case-insensitive)
             return value_str.lower() in {'true', '1', 'yes', 'on'}
         
         elif param_type == 'color':
-            # Auto-add # if missing
             if value_str.startswith('#'):
                 return value_str
             else:
@@ -309,122 +290,48 @@ class HTMLFrameGenerator:
             param_type = match.group(2) or 'text'
             default_value_str = match.group(3)
             
-            # Check if value is provided
             if param_name in values:
                 value = values[param_name]
-                # Convert bool to string for HTML
                 if isinstance(value, bool):
                     return 'true' if value else 'false'
                 return str(value) if value is not None else ''
             
-            # Use default value from placeholder if available
             elif default_value_str:
                 return default_value_str
             
-            # No value and no default
             else:
                 return ''
         
         return re.sub(PARAM_PATTERN, replacer, html)
-    
-    def _find_chrome_executable(self) -> Optional[str]:
-        """
-        Find suitable Chrome/Chromium executable, preferring non-snap versions
-        
-        Returns:
-            Path to Chrome executable or None to use default
-        """
-        if os.name != 'posix':
-            return None
-        
-        import subprocess
-        
-        # Preferred browsers (non-snap versions)
-        candidates = [
-            '/usr/bin/google-chrome',
-            '/usr/bin/google-chrome-stable',
-            '/usr/bin/chromium',
-            '/usr/bin/chromium-browser',
-            '/usr/local/bin/chrome',
-            '/usr/local/bin/chromium',
-        ]
-        
-        # Check each candidate
-        for path in candidates:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                try:
-                    # Verify it's not a snap by checking the path
-                    result = subprocess.run(
-                        ['readlink', '-f', path],
-                        capture_output=True,
-                        text=True,
-                        timeout=1
-                    )
-                    real_path = result.stdout.strip()
-                    
-                    if '/snap/' not in real_path:
-                        logger.info(f"✓ Found non-snap browser: {path} -> {real_path}")
-                        return path
-                    else:
-                        logger.debug(f"✗ Skipping snap browser: {path}")
-                except Exception as e:
-                    logger.debug(f"Error checking {path}: {e}")
-        
-        # Warn if no suitable browser found
-        logger.warning(
-            "⚠️  No non-snap Chrome/Chromium found. Snap browsers have AppArmor restrictions.\n"
-            "   Install system Chrome with:\n"
-            "   wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb\n"
-            "   sudo dpkg -i google-chrome-stable_current_amd64.deb\n"
-            "   Or install Chromium: sudo apt-get install -y chromium-browser"
-        )
-        return None
-    
-    def _ensure_hti(self, width: int, height: int):
-        """Lazily initialize Html2Image instance"""
-        if self.hti is None:
-            # Configure Chrome flags for Linux headless environment
-            custom_flags = [
-                '--default-background-color=00000000',
-                '--no-sandbox',  # Bypass AppArmor/sandbox restrictions
-                '--disable-dev-shm-usage',  # Avoid shared memory issues
-                '--disable-gpu',  # Disable GPU acceleration
-                '--disable-software-rasterizer',  # Disable software rasterizer
-                '--disable-extensions',  # Disable extensions
-                '--disable-setuid-sandbox',  # Additional sandbox bypass
-                '--disable-dbus',  # Disable DBus to avoid permission errors
-                '--hide-scrollbars',  # Hide scrollbars for cleaner output
-                '--mute-audio',  # Mute audio
-                '--disable-background-networking',  # Disable background networking
-                '--disable-features=TranslateUI',  # Disable translate UI
-                '--disable-ipc-flooding-protection',  # Improve performance
-                '--no-first-run',  # Skip first run dialogs
-                '--no-default-browser-check',  # Skip default browser check
-                '--disable-backgrounding-occluded-windows',  # Improve performance
-                '--disable-renderer-backgrounding',  # Improve performance
-            ]
-            
-            # Try to find non-snap browser
-            browser_path = self._find_chrome_executable()
-            
-            # Workaround: Add extra height to compensate for Chromium screenshot cropping bug
-            # The extra pixels will be cropped back in generate_frame() after rendering
-            # See CHROMIUM_HEIGHT_OFFSET constant for details
-            kwargs = {
-                'size': (width, height + self.CHROMIUM_HEIGHT_OFFSET),
-                'custom_flags': custom_flags
-            }
-            
-            if browser_path:
-                kwargs['browser_executable'] = browser_path
-            
-            self.hti = Html2Image(**kwargs)
-            
-            if browser_path:
-                logger.debug(f"Initialized Html2Image with size ({width}, {height}), {len(custom_flags)} custom flags, using browser: {browser_path}")
-            else:
-                logger.debug(f"Initialized Html2Image with size ({width}, {height}) and {len(custom_flags)} custom flags")
-    
+
+    @classmethod
+    async def _ensure_browser(cls):
+        """Lazily initialize a shared Playwright browser instance"""
+        if cls._browser is None or not cls._browser.is_connected():
+            from playwright.async_api import async_playwright
+            cls._playwright = await async_playwright().start()
+            cls._browser = await cls._playwright.chromium.launch(
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-extensions',
+                ]
+            )
+            logger.debug("Initialized Playwright Chromium browser")
+        return cls._browser
+
+    @classmethod
+    async def close_browser(cls):
+        """Shutdown the shared browser instance (call on app teardown)"""
+        if cls._browser:
+            await cls._browser.close()
+            cls._browser = None
+        if cls._playwright:
+            await cls._playwright.stop()
+            cls._playwright = None
+            logger.debug("Playwright browser closed")
+
     async def generate_frame(
         self,
         title: str,
@@ -448,85 +355,60 @@ class HTMLFrameGenerator:
         Returns:
             Path to generated frame image
         """
-        # Convert image path to absolute path or file:// URL for html2image
         if image and not image.startswith(('http://', 'https://', 'data:', 'file://')):
-            # Local file path - convert to absolute path and file:// URL
             image_path = Path(image)
             if not image_path.is_absolute():
-                # Relative to current working directory (project root)
                 image_path = Path.cwd() / image
             
-            # Ensure the file exists
             if not image_path.exists():
                 logger.warning(f"Image file not found: {image_path}")
             else:
-                # Convert to file:// URL for html2image compatibility
                 image = image_path.as_uri()
                 logger.debug(f"Converted image path to: {image}")
         
-        # Build variable context
         context = {
-            # Required variables
             "title": title,
             "text": text,
             "image": image,
         }
         
-        # Add all ext fields
         if ext:
             context.update(ext)
         
-        # Replace variables in HTML (supports DSL syntax: {{param:type=default}})
         html = self._replace_parameters(self.template, context)
-        # Use provided output path or auto-generate
+
         if output_path is None:
-            # Fallback: auto-generate (for backward compatibility)
             from pixelle_video.utils.os_util import get_output_path
             output_filename = f"frame_{uuid.uuid4().hex[:16]}.png"
             output_path = get_output_path(output_filename)
         else:
-            # Ensure parent directory exists
-            import os
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
-        # Extract filename from output_path for html2image
-        import os
-        output_filename = os.path.basename(output_path)
-        output_dir = os.path.dirname(output_path)
-        
-        # Ensure Html2Image is initialized with template's size
-        self._ensure_hti(self.width, self.height)
-        
-        # Render HTML to image
         logger.debug(f"Rendering HTML template to {output_path} (size: {self.width}x{self.height})")
+        tmp_html_path = None
         try:
-            self.hti.screenshot(
-                html_str=html,
-                save_as=output_filename
+            browser = await self._ensure_browser()
+            page = await browser.new_page(
+                viewport={'width': self.width, 'height': self.height},
+                device_scale_factor=1,
             )
+            try:
+                # Write HTML to a temp file and navigate via file:// URL so that
+                # local file:// image references are loaded under the same origin.
+                fd, tmp_html_path = tempfile.mkstemp(suffix='.html', prefix='pv_frame_')
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                
+                await page.goto(Path(tmp_html_path).as_uri(), wait_until='networkidle')
+                await page.screenshot(path=output_path, type='png', omit_background=True)
+            finally:
+                await page.close()
+                if tmp_html_path and os.path.exists(tmp_html_path):
+                    os.unlink(tmp_html_path)
             
-            # html2image saves to current directory by default, move to target directory
-            import shutil
-            temp_file = os.path.join(os.getcwd(), output_filename)
-            if os.path.exists(temp_file) and temp_file != output_path:
-                shutil.move(temp_file, output_path)
-            
-            # Workaround: Crop image to remove extra height added to compensate for Chromium bug
-            # Chromium screenshots are cropped at the bottom, so we render with extra height
-            # and then crop it back to the desired size. See CHROMIUM_HEIGHT_OFFSET constant.
-            # Reference: https://issues.chromium.org/issues/405165895
-            if os.path.exists(output_path):
-                with Image.open(output_path) as img:
-                    # Crop from (0, 0) to (originWidth, originHeight)
-                    # This removes the extra CHROMIUM_HEIGHT_OFFSET pixels added during rendering
-                    cropped_img = img.crop((0, 0, self.width, self.height))
-                    cropped_img.save(output_path)
-                    logger.debug(f"Cropped image to size: {self.width}x{self.height} (removed {self.CHROMIUM_HEIGHT_OFFSET}px workaround offset)")
-            
-            logger.info(f"✅ Frame generated: {output_path}")
+            logger.info(f"Frame generated: {output_path}")
             return output_path
             
         except Exception as e:
             logger.error(f"Failed to render HTML template: {e}")
             raise RuntimeError(f"HTML rendering failed: {e}")
-

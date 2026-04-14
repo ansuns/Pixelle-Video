@@ -51,6 +51,9 @@ async def shutdown_pixelle_video():
         logger.info("Shutting down Pixelle-Video...")
         await _pixelle_video_instance.cleanup()
         _pixelle_video_instance = None
+    
+    from pixelle_video.services.frame_html import HTMLFrameGenerator
+    await HTMLFrameGenerator.close_browser()
 
 
 # Type alias for dependency injection
